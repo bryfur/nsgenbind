@@ -465,6 +465,72 @@ static bool output_argument_default(struct opctx *outc,
         return false;
 }
 
+/* whether a binding node has code */
+static bool has_code(struct genbind_node *node)
+{
+        return (node != NULL) &&
+               (genbind_node_find_type(genbind_node_getnode(node), NULL,
+                                       GENBIND_NODE_TYPE_CDATA) != NULL);
+}
+
+static bool is_event_handler_attribute(struct ir_attribute_entry *atributee)
+{
+        const char *type = atributee->typev[0].name;
+        size_t len;
+
+        if (type == NULL) {
+                return false;
+        }
+        len = strlen(type);
+        return (len >= 12) && (strcmp(type + len - 12, "EventHandler") == 0) &&
+               (atributee->name[0] == 'o') && (atributee->name[1] == 'n');
+}
+
+/* whether an attribute's accessor can be generated (qjs-libdom-generated.c) */
+static bool attribute_generable(struct ir_attribute_entry *atributee)
+{
+        if (atributee->typec != 1) {
+                return false;
+        }
+        switch (atributee->typev[0].base) {
+        case WEBIDL_TYPE_STRING:
+        case WEBIDL_TYPE_LONG:
+        case WEBIDL_TYPE_SHORT:
+        case WEBIDL_TYPE_BOOL:
+                return true;
+        case WEBIDL_TYPE_USER:
+                return is_event_handler_attribute(atributee);
+        default:
+                return false;
+        }
+}
+
+/* whether an operation has a body (an unimplemented one is not on the
+ * prototype at all: scripts feature-detecting see it missing)
+ */
+static bool operation_implemented(struct ir_operation_entry *operatione)
+{
+        return (operatione->name != NULL) && has_code(operatione->method);
+}
+
+static bool getter_implemented(struct ir_attribute_entry *atributee)
+{
+        return (atributee->getter != NULL) &&
+               (has_code(atributee->getter) || attribute_generable(atributee));
+}
+
+static bool setter_implemented(struct ir_attribute_entry *atributee)
+{
+        if ((atributee->modifier == WEBIDL_TYPE_MODIFIER_READONLY) &&
+            (atributee->putforwards == NULL)) {
+                return false;
+        }
+        if (atributee->setter != NULL) {
+                return has_code(atributee->setter) || attribute_generable(atributee);
+        }
+        return (atributee->putforwards != NULL) && getter_implemented(atributee);
+}
+
 /**
  * the body of an operation in a function of its own:
  * ctx, this_val, priv, argc, argv in scope
@@ -522,6 +588,13 @@ static int output_interface_operation(struct opctx *outc,
                      "Special operation on interface %s (operation entry %p)",
                      interfacee->name, operatione);
                 outputf(outc, "/* Special method definition - UNIMPLEMENTED */\n\n");
+                return 0;
+        }
+
+        if (!operation_implemented(operatione)) {
+                WARN(WARNING_UNIMPLEMENTED,
+                     "Unimplemented: method %s::%s();",
+                     interfacee->name, operatione->name);
                 return 0;
         }
 
@@ -711,12 +784,6 @@ static void output_attribute_setter(struct opctx *outc,
         outputf(outc, "}\n\n");
 }
 
-static bool attribute_has_setter(struct ir_attribute_entry *atributee)
-{
-        return (atributee->modifier != WEBIDL_TYPE_MODIFIER_READONLY) ||
-               (atributee->putforwards != NULL);
-}
-
 static void output_interface_attributes(struct opctx *outc,
                                         struct ir_entry *interfacee)
 {
@@ -730,8 +797,14 @@ static void output_interface_attributes(struct opctx *outc,
                         atributee->property_name =
                                 gen_idl2c_name(atributee->name);
                 }
+                if (!getter_implemented(atributee)) {
+                        WARN(WARNING_UNIMPLEMENTED,
+                             "Unimplemented: getter %s::%s();",
+                             interfacee->name, atributee->name);
+                        continue;
+                }
                 output_attribute_getter(outc, interfacee, atributee);
-                if (attribute_has_setter(atributee)) {
+                if (setter_implemented(atributee)) {
                         output_attribute_setter(outc, interfacee, atributee);
                 }
         }
@@ -760,7 +833,7 @@ static void output_list_hooks(struct opctx *outc, struct ir_entry *interfacee)
 
         for (i = 0; i < ife->operationc; i++) {
                 struct ir_operation_entry *o = ife->operationv + i;
-                if ((o->name == NULL) || (o->overloadc != 1) ||
+                if (!operation_implemented(o) || (o->overloadc != 1) ||
                     (o->overloadv->argumentc != 1)) {
                         continue;
                 }
@@ -772,7 +845,8 @@ static void output_list_hooks(struct opctx *outc, struct ir_entry *interfacee)
                 }
         }
         for (i = 0; i < ife->attributec; i++) {
-                if (strcmp(ife->attributev[i].name, "length") == 0) {
+                if ((strcmp(ife->attributev[i].name, "length") == 0) &&
+                    getter_implemented(ife->attributev + i)) {
                         length = true;
                 }
         }
@@ -807,7 +881,7 @@ static void output_interface_class(struct opctx *outc,
                 QLPFX, interfacee->class_name);
         for (i = 0; i < ife->operationc; i++) {
                 struct ir_operation_entry *operatione = ife->operationv + i;
-                if (operatione->name == NULL) {
+                if (!operation_implemented(operatione)) {
                         continue;
                 }
                 outputf(outc, "\tQJSKY_METHOD(\"%s\", %d, %s_%s_%s),\n",
@@ -816,10 +890,13 @@ static void output_interface_class(struct opctx *outc,
         }
         for (i = 0; i < ife->attributec; i++) {
                 struct ir_attribute_entry *atributee = ife->attributev + i;
+                if (!getter_implemented(atributee)) {
+                        continue;
+                }
                 outputf(outc, "\tQJSKY_ATTRIBUTE(\"%s\", %s_%s_%s_getter, ",
                         atributee->name,
                         QLPFX, interfacee->class_name, atributee->name);
-                if (attribute_has_setter(atributee)) {
+                if (setter_implemented(atributee)) {
                         outputf(outc, "%s_%s_%s_setter),\n",
                                 QLPFX, interfacee->class_name,
                                 atributee->name);
