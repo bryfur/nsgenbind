@@ -746,6 +746,50 @@ static int constant_value(struct ir_constant_entry *constante)
 }
 
 /**
+ * a list's hooks: an item(index) operation with a length attribute (the
+ * indexed getter), a one argument namedItem or getNamedItem (the named
+ * getter)
+ */
+static void output_list_hooks(struct opctx *outc, struct ir_entry *interfacee)
+{
+        struct ir_interface_entry *ife = &interfacee->u.interface;
+        const char *item = NULL;
+        const char *named = NULL;
+        bool length = false;
+        int i;
+
+        for (i = 0; i < ife->operationc; i++) {
+                struct ir_operation_entry *o = ife->operationv + i;
+                if ((o->name == NULL) || (o->overloadc != 1) ||
+                    (o->overloadv->argumentc != 1)) {
+                        continue;
+                }
+                if (strcmp(o->name, "item") == 0) {
+                        item = o->name;
+                } else if ((strcmp(o->name, "namedItem") == 0) ||
+                           (strcmp(o->name, "getNamedItem") == 0)) {
+                        named = o->name;
+                }
+        }
+        for (i = 0; i < ife->attributec; i++) {
+                if (strcmp(ife->attributev[i].name, "length") == 0) {
+                        length = true;
+                }
+        }
+        if ((item != NULL) && length) {
+                outputf(outc,
+                        "\t.indexed_item = %s_%s_%s,\n"
+                        "\t.indexed_length = %s_%s_length_getter,\n",
+                        QLPFX, interfacee->class_name, item,
+                        QLPFX, interfacee->class_name);
+        }
+        if (named != NULL) {
+                outputf(outc, "\t.named_item = %s_%s_%s,\n",
+                        QLPFX, interfacee->class_name, named);
+        }
+}
+
+/**
  * the prototype's and interface object's function lists, the class
  */
 static void output_interface_class(struct opctx *outc,
@@ -842,6 +886,7 @@ static void output_interface_class(struct opctx *outc,
         }
         outputf(outc, "\t.destroy = %s_%s___destroy,\n",
                 QLPFX, interfacee->class_name);
+        output_list_hooks(outc, interfacee);
         if (!ife->primary_global && (argc == 1) &&
             (interfacee->class_init_argt[0] == IR_INIT_ARG_POINTER)) {
                 outputf(outc, "\t.create = %s_%s___create_ptr,\n",
